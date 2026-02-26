@@ -2,6 +2,7 @@ import os
 import glob
 import math
 import argparse
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -56,6 +57,18 @@ def pad_or_trim(x: np.ndarray, target_len: int) -> np.ndarray:
     if len(x) > target_len:
         return x[:target_len]
     return np.pad(x, (0, target_len - len(x)), mode="constant")
+
+
+def find_next_index(out_dir: str, prefix: str) -> int:
+    pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)\.wav$")
+    max_idx = 0
+    for p in glob.glob(os.path.join(out_dir, "*.wav")):
+        name = os.path.basename(p)
+        m = pattern.match(name)
+        if not m:
+            continue
+        max_idx = max(max_idx, int(m.group(1)))
+    return max_idx + 1
 
 
 # -------------------------
@@ -122,21 +135,35 @@ def crop_center_by_energy(wav: np.ndarray, sr: int, cfg: CenterCropCfg) -> np.nd
     return clip.astype(np.float32)
 
 
-def process_keyword_folder(in_dir: str, out_dir: str, cfg: CenterCropCfg, glob_pattern: str = "*.wav"):
+def process_keyword_folder(
+    in_dir: str,
+    out_dir: str,
+    cfg: CenterCropCfg,
+    glob_pattern: str = "*.wav",
+    sequential: bool = False,
+    prefix: str = "zoom",
+    start_idx: int = 1,
+):
     ensure_dir(out_dir)
     paths = sorted(glob.glob(os.path.join(in_dir, glob_pattern)))
     if not paths:
         print(f"[WARN] No wav found: {in_dir}")
         return
 
+    cur_idx = start_idx
     for idx, p in enumerate(paths):
         x, sr = sf.read(p, dtype="float32", always_2d=True)
         x = to_mono(x)
 
         clip = crop_center_by_energy(x, sr, cfg)
 
-        base = os.path.splitext(os.path.basename(p))[0]
-        out_path = os.path.join(out_dir, f"{base}__crop1s.wav")
+        if sequential:
+            out_name = f"{prefix}_{cur_idx:06d}.wav"
+            cur_idx += 1
+        else:
+            base = os.path.splitext(os.path.basename(p))[0]
+            out_name = f"{base}__crop1s.wav"
+        out_path = os.path.join(out_dir, out_name)
         sf.write(out_path, clip, cfg.target_sr, subtype="PCM_16")
 
         if (idx + 1) % 100 == 0:
@@ -157,6 +184,10 @@ def main():
     ap.add_argument("--frame_ms", type=float, default=20.0)
     ap.add_argument("--hop_ms", type=float, default=10.0)
     ap.add_argument("--smooth_win", type=int, default=5)
+    ap.add_argument("--sequential", action="store_true", help="prefix_000001.wav 형태로 순번 저장")
+    ap.add_argument("--prefix", type=str, default="zoom", help="sequential 저장 시 파일명 prefix")
+    ap.add_argument("--start_idx", type=int, default=1, help="sequential 저장 시작 번호")
+    ap.add_argument("--continue_numbering", action="store_true", help="out_dir에서 기존 번호 다음부터 저장")
     args = ap.parse_args()
 
     cfg = CenterCropCfg(
@@ -166,7 +197,18 @@ def main():
         hop_ms=args.hop_ms,
         smooth_win=args.smooth_win,
     )
-    process_keyword_folder(args.in_dir, args.out_dir, cfg)
+    start_idx = args.start_idx
+    if args.sequential and args.continue_numbering:
+        start_idx = find_next_index(args.out_dir, args.prefix)
+
+    process_keyword_folder(
+        args.in_dir,
+        args.out_dir,
+        cfg,
+        sequential=args.sequential,
+        prefix=args.prefix,
+        start_idx=start_idx,
+    )
 
 
 if __name__ == "__main__":
