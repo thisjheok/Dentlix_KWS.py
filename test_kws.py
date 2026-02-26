@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from train_kws import CFG, KWSDataset, TinyKWSNet, read_split_file
+from models import TinyKWSNet
+from train_kws import CFG, KWSDataset, read_split_file
 
 
 def parse_args():
