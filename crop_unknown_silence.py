@@ -232,7 +232,7 @@ def crop_unknown_speech_only(
 
     # centered: 세그먼트에서 1초짜리 여러 개 생성
     # 원칙: 세그먼트가 1초보다 짧으면 패딩해서 1초로 만들고, 길면 stride로 여러 개 생성
-    stride = int(round(cfg.sr * 0.5))  # 0.5초 간격(원하면 조정)
+    stride = int(round(cfg.sr * 0.25))  # 0.25초 간격
     for s, e in segments:
         seg = x[s:e]
         if len(seg) <= out_len:
