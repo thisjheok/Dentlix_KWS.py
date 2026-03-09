@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 
 from models import TinyKWSNet
-from train_kws import CFG
+from train_kws_znorm import CFG
 
 
 def load_model(checkpoint_path: Path):
