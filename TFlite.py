@@ -4,7 +4,7 @@ from typing import Iterator
 
 import numpy as np
 
-from train_kws import CFG, KWSDataset, read_split_file
+from train_kws_BN import CFG, KWSDataset, infer_labels, read_split_file
 
 
 def _shape_compatible(candidate_shape: tuple[int, ...], spec_shape: list[int | None]) -> bool:
@@ -19,19 +19,17 @@ def _shape_compatible(candidate_shape: tuple[int, ...], spec_shape: list[int | N
 
 
 def _format_feature_for_signature(feature, input_shape: list[int | None]) -> np.ndarray:
-    # feature: (1, n_mels, time) from KWSDataset (channel-first, no batch dim)
-    c_hw = feature.numpy().astype(np.float32)  # (1, n_mels, time)
-    b_chw = feature.unsqueeze(0).numpy().astype(np.float32)  # (1, 1, n_mels, time)
-    b_hwc = np.transpose(b_chw, (0, 2, 3, 1))  # (1, n_mels, time, 1)
+    c_hw = feature.numpy().astype(np.float32)
+    b_chw = feature.unsqueeze(0).numpy().astype(np.float32)
+    b_hwc = np.transpose(b_chw, (0, 2, 3, 1))
 
-    candidates = [c_hw, b_chw, b_hwc]
-    for arr in candidates:
+    for arr in (c_hw, b_chw, b_hwc):
         if _shape_compatible(arr.shape, input_shape):
             return arr
 
     raise ValueError(
         f"No compatible representative sample shape for input spec {input_shape}. "
-        f"Tried {[arr.shape for arr in candidates]}"
+        f"Tried {[arr.shape for arr in (c_hw, b_chw, b_hwc)]}"
     )
 
 
@@ -43,8 +41,7 @@ def representative_dataset(
 
     for idx in range(min(max_samples, len(dataset))):
         feature, _ = dataset[idx]
-        x = _format_feature_for_signature(feature, input_shape)
-        yield [x]
+        yield [_format_feature_for_signature(feature, input_shape)]
 
 
 def get_saved_model_input_shape(tf_module, saved_model_dir: Path) -> list[int | None]:
@@ -53,10 +50,7 @@ def get_saved_model_input_shape(tf_module, saved_model_dir: Path) -> list[int | 
     if not signatures:
         raise RuntimeError("No signatures found in SavedModel.")
 
-    fn = signatures.get("serving_default")
-    if fn is None:
-        fn = next(iter(signatures.values()))
-
+    fn = signatures.get("serving_default") or next(iter(signatures.values()))
     _, kwargs = fn.structured_input_signature
     if not kwargs:
         raise RuntimeError("Cannot find keyword input signature in SavedModel.")
@@ -77,9 +71,7 @@ def check_saved_model_dir(saved_model_dir: Path) -> None:
                 "This script converts TensorFlow SavedModel to TFLite. "
                 "Convert/export your PyTorch model to TensorFlow SavedModel first."
             )
-        raise FileNotFoundError(
-            f"`saved_model.pb` not found in: {saved_model_dir}{hint}"
-        )
+        raise FileNotFoundError(f"`saved_model.pb` not found in: {saved_model_dir}{hint}")
 
 
 def main() -> None:
@@ -94,12 +86,11 @@ def main() -> None:
     try:
         import tensorflow as tf
     except ImportError as exc:
-        raise ImportError(
-            "TensorFlow is required. Install with `pip install tensorflow`."
-        ) from exc
+        raise ImportError("TensorFlow is required. Install with `pip install tensorflow`.") from exc
 
     cfg = CFG()
     cfg.root_dir = args.root_dir
+    cfg.labels = infer_labels(cfg.root_dir, (cfg.train_list, cfg.val_list, cfg.test_list))
 
     saved_model_dir = Path(args.saved_model_dir)
     output_path = Path(args.output)
@@ -111,9 +102,7 @@ def main() -> None:
 
     converter = tf.lite.TFLiteConverter.from_saved_model(str(saved_model_dir))
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.representative_dataset = lambda: representative_dataset(
-        cfg, args.rep_split, args.rep_samples, input_shape
-    )
+    converter.representative_dataset = lambda: representative_dataset(cfg, args.rep_split, args.rep_samples, input_shape)
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
     converter.inference_input_type = tf.int8
     converter.inference_output_type = tf.int8
@@ -121,7 +110,6 @@ def main() -> None:
     tflite_model = converter.convert()
     output_path.write_bytes(tflite_model)
 
-    # Quick sanity check of IO dtypes.
     interpreter = tf.lite.Interpreter(model_path=str(output_path))
     interpreter.allocate_tensors()
     in_dtype = interpreter.get_input_details()[0]["dtype"]

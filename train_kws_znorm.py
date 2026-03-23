@@ -1,6 +1,7 @@
 import os
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
@@ -18,7 +19,7 @@ from models import TinyKWSNet
 @dataclass
 class CFG:
     # dataset
-    root_dir: str = "." 
+    root_dir: str = "."
     train_list: str = "splits/train.txt"
     val_list: str = "splits/val.txt"
     test_list: str = "splits/test.txt"
@@ -40,7 +41,7 @@ class CFG:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     # labels
-    labels: Tuple[str, ...] = ("zoom", "unknown", "silence")
+    labels: Tuple[str, ...] = ()
 
 
 cfg = CFG()
@@ -58,12 +59,33 @@ def set_seed(seed: int):
 def read_split_file(root_dir: str, split_relpath: str) -> List[str]:
     """
     returns list of relative audio paths like:
-    audio/zoom/A__zoom__spk-...wav
+    processed_data/zoom/zoom_000001.wav
     """
     p = os.path.join(root_dir, split_relpath)
     with open(p, "r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f.readlines() if ln.strip()]
     return lines
+
+
+def infer_labels(root_dir: str, split_relpaths: Tuple[str, ...], data_dir: str = "processed_data") -> Tuple[str, ...]:
+    labels = set()
+
+    for split_relpath in split_relpaths:
+        split_path = Path(root_dir) / split_relpath
+        if not split_path.exists():
+            continue
+        for relpath in read_split_file(root_dir, split_relpath):
+            parts = Path(relpath).parts
+            if len(parts) >= 2:
+                labels.add(parts[1])
+
+    if labels:
+        return tuple(sorted(labels))
+
+    data_root = Path(root_dir) / data_dir
+    if not data_root.exists():
+        return ()
+    return tuple(sorted(path.name for path in data_root.iterdir() if path.is_dir()))
 
 
 def pad_or_trim(wav: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -75,7 +97,6 @@ def pad_or_trim(wav: torch.Tensor, target_len: int) -> torch.Tensor:
         return wav
     if T > target_len:
         return wav[..., :target_len]
-    # pad
     pad_len = target_len - T
     return torch.nn.functional.pad(wav, (0, pad_len))
 
@@ -100,11 +121,9 @@ class KWSDataset(Dataset):
             power=2.0,
         )
         self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB(stype="power")
-
         self.target_len = int(cfg.sample_rate * cfg.clip_seconds)
 
     def _infer_label_from_path(self, relpath: str) -> str:
-        # relpath; 두번째 토큰이 라벨이된다. 
         parts = relpath.replace("\\", "/").split("/")
         if len(parts) < 2:
             raise ValueError(f"Bad relpath: {relpath}")
@@ -116,36 +135,25 @@ class KWSDataset(Dataset):
     def __getitem__(self, idx: int):
         relpath = self.file_list[idx]
         abspath = os.path.join(self.root_dir, relpath)
-        wav, sr = torchaudio.load(abspath)  # wav: (C, T)
+        wav, sr = torchaudio.load(abspath)
 
-        # mono + resample
         if wav.shape[0] > 1:
             wav = torch.mean(wav, dim=0, keepdim=True)
         if sr != self.cfg.sample_rate:
             wav = torchaudio.functional.resample(wav, sr, self.cfg.sample_rate)
 
-        # length normalize
         wav = pad_or_trim(wav, self.target_len)
 
-        # (선택) 간단한 augmentation: gain, noise (데모용 최소)
         if self.train:
-            # random gain
-            gain = 10 ** (random.uniform(-6, 3) / 20.0)  # -6dB ~ +3dB
-            wav = wav * gain
-            # clamp
-            wav = torch.clamp(wav, -1.0, 1.0)
+            gain = 10 ** (random.uniform(-6, 3) / 20.0)
+            wav = torch.clamp(wav * gain, -1.0, 1.0)
 
-        # feature: log-mel (shape: [n_mels, time])
-        mel = self.mel(wav)             # (1, n_mels, time)
-        logmel = self.amplitude_to_db(mel)  # (1, n_mels, time)
-
-        # normalize per sample
+        mel = self.mel(wav)
+        logmel = self.amplitude_to_db(mel)
         logmel = (logmel - logmel.mean()) / (logmel.std() + 1e-6)
 
         label_str = self._infer_label_from_path(relpath)
         y = self.label_to_id[label_str]
-
-        # return: (1, n_mels, time), label
         return logmel, torch.tensor(y, dtype=torch.long)
 
 
@@ -174,6 +182,7 @@ def train():
 
     train_files = read_split_file(cfg.root_dir, cfg.train_list)
     val_files = read_split_file(cfg.root_dir, cfg.val_list)
+    cfg.labels = infer_labels(cfg.root_dir, (cfg.train_list, cfg.val_list, cfg.test_list))
 
     ds_train = KWSDataset(cfg.root_dir, train_files, cfg.labels, cfg, train=True)
     ds_val = KWSDataset(cfg.root_dir, val_files, cfg.labels, cfg, train=False)
